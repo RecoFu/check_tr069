@@ -1,62 +1,22 @@
-# ⚡ NetFreak.ps1 — 控制狂版網路自我診斷
+# ⚡ NetFreak.ps1 v1.1 — Red Team Hardened Edition
 
-> **版本** v1.0 / 2026-02-18
-> **定位** 超越 GlassWire / PingPlotter / WinMTR / Speedtest 的全功能 PS 診斷腳本
-> **No Install** 純 PowerShell 5.1+，零依賴，零安裝
-
----
-
-## 為什麼要做這個？現有工具的盲點
-
-| 工具 | 缺少什麼 |
-|------|---------|
-| GlassWire | 無 MTU 偵測、無 DNS 洩漏測試、無 ASN/BGP、無安全評分 |
-| PingPlotter | 只有延遲/路由，無 Port 掃描、無 UPnP 審計、無 IGMP |
-| WinMTR | 單一功能（MTR），無法輸出 HTML、無程序對應 |
-| Speedtest CLI | 只測速，無安全、無 DNS、無 IPv6 審計 |
-| NetLimiter | GUI 商業軟體，需安裝，無 CLI/腳本整合 |
-
-**NetFreak 的 13 項獨家功能（[U1]–[U13]）：**
-
-| 代號 | 功能 | 說明 |
-|------|------|------|
-| U1 | **MTU 路徑發現** | 二元搜尋找最佳 MTU，CHT PPPoE 自動識別 1492 |
-| U2 | **DNS 洩漏測試** | 跨 5 個 resolver 比對，偵測 DNS 劫持/分流 |
-| U3 | **ASN / BGP / Geo** | 公網 IP 的 ISP / AS 號碼 / 城市 / 威脅評分 |
-| U4 | **MOS 語音品質分數** | ITU-T G.107 E-model，量化 VoIP/MOD 通話品質 |
-| U5 | **IGMP 組播偵測** | CHT MOD/IPTV multicast 群組確認 |
-| U6 | **UPnP Port 審計** | SSDP 發現 + 列出 UPnP 暴露的 Port 映射 |
-| U7 | **MAC 廠商查詢** | OUI 查詢識別 ONT/Router 製造商 |
-| U8 | **雙網卡路由衝突偵測** | 多 Gateway 時自動警告路由衝突風險 |
-| U9 | **ARP Cache LAN 地圖** | 列出同網段所有裝置 |
-| U10 | **IPv6 完整審計** | SLAAC/DHCPv6/公網暴露/防火牆建議 |
-| U11 | **資安評分 A–F** | 12 因子加權評分，完整建議清單 |
-| U12 | **HTML 自包含報告** | 暗色系儀表板風格，附安全等級徽章 |
-| U13 | **持續監控模式** | `-Monitor` 旗標啟動即時趨勢監看 |
+> **版本** v1.1 / 2026-02-18
+> **定位** 控制狂版網路自我診斷 — 紅隊稽核後強化版
 
 ---
 
-## 適用環境
+## v1.1 修正對照表（紅隊稽核回應）
 
-| 項目 | 需求 |
-|------|------|
-| OS | Windows 10 / 11 |
-| PowerShell | 5.1（內建）/ 7+（完整支援） |
-| 權限 | **系統管理員** |
-| 網路 | 有線或無線，建議有線執行完整測試 |
-
----
-
-## 安裝 / 解鎖
-
-```powershell
-# 方法 A：單次執行（建議）
-powershell -ExecutionPolicy Bypass -File "D:\NetFreak.ps1" -GW 192.168.1.1
-
-# 方法 B：Unblock 後直接執行
-Unblock-File "D:\NetFreak.ps1"
-.\NetFreak.ps1 -GW 192.168.1.1
-```
+| 稽核ID | 風險分數 | 問題 | v1.1修正 |
+|--------|---------|------|---------|
+| **RT-D1** | R=3.8 | MAC OUI 送出至 `macvendors.com`，洩漏內部MAC | **嵌入300廠商OUI靜態表，零外部呼叫** |
+| **RT-D1** | R=3.8 | ASN/IP/Geo自動送至`ipinfo.io`/`abuseipdb` | **改為`-AllowExternalAPI`明確opt-in旗標** |
+| **RT-D2** | R=4.25 | SSDP掃描+TCP多Port同時觸發EDR | **`-Stealth`旗標：加probe延遲、停用SSDP** |
+| **RT-D3** | R=1.2 | MTU二元搜尋大量ICMP可能crash舊ONT | **3次probe取多數決，搜尋範圍縮至1000-1500** |
+| **RT-U11** | — | 安全評分主觀，無CVSS/MITRE對應 | **每條扣分附CVSS v3.1向量 + MITRE ATT&CK TTP** |
+| **RT-U4** | — | MOS公式簡化，偏差10-20% | **改用codec表（G.711/G.729/G.722）完整E-model** |
+| **RT-U2** | — | DNS洩漏未考慮TTL差異 | **新增TTL比對，TTL spread>30s額外警告** |
+| **RT-NEW** | — | 無法識別高權限帳號的連線程序 | **新增[U14]：`Get-Process -IncludeUserName`+特權標記** |
 
 ---
 
@@ -65,174 +25,223 @@ Unblock-File "D:\NetFreak.ps1"
 ### 語法
 
 ```powershell
-.\NetFreak.ps1 [-GW <IP>] [-PingCount <N>] [-Monitor] [-Html] [-SkipSlow]
+.\NetFreak_v1.1.ps1 [-GW <IP>] [-PingCount <N>] [-Html] [-SkipSlow] [-Stealth] [-AllowExternalAPI]
 ```
 
-### 參數
+### 新增旗標（v1.1）
 
-| 參數 | 預設 | 說明 |
-|------|------|------|
-| `-GW` | 自動偵測 | 指定目標 Gateway IP（ONT 管理頁 IP） |
-| `-PingCount` | 20 | 延遲品質測試的 Ping 次數（建議 20–50） |
-| `-Monitor` | off | 持續監控模式（Ctrl+C 停止） |
-| `-Html` | off | 同時產生 HTML 報告 |
-| `-SkipSlow` | off | 跳過慢速測試（MTU/UPnP/IPv6），加速約 40% |
+| 旗標 | 說明 |
+|------|------|
+| `-Stealth` | 低暴露模式：Port掃描加延遲500ms、停用SSDP、禁用外部API |
+| `-AllowExternalAPI` | 明確允許呼叫外部API（ipinfo.io / abuseipdb） |
 
-### 範例
+### 使用情境
 
 ```powershell
-# 標準診斷
-.\NetFreak.ps1 -GW 192.168.1.1
+# 標準診斷（外部API關閉，資料不出去）
+powershell -ExecutionPolicy Bypass -File "D:\NetFreak_v1.1.ps1" -GW 192.168.1.1 -Html
 
-# 完整診斷 + HTML 報告
-powershell -ExecutionPolicy Bypass -File "D:\NetFreak.ps1" -GW 192.168.1.1 -Html
+# 完整診斷含ASN/威脅情報（允許外部API）
+powershell -ExecutionPolicy Bypass -File "D:\NetFreak_v1.1.ps1" -GW 192.168.1.1 -Html -AllowExternalAPI
+
+# 低暴露模式（減少EDR觸發風險）
+.\NetFreak_v1.1.ps1 -GW 192.168.1.1 -Stealth
 
 # 快速掃（跳過慢速測試）
-.\NetFreak.ps1 -GW 192.168.1.1 -SkipSlow
-
-# 高精度延遲品質（50 次 Ping）
-.\NetFreak.ps1 -GW 192.168.1.1 -PingCount 50 -Html
+.\NetFreak_v1.1.ps1 -GW 192.168.1.1 -SkipSlow -Html
 ```
 
 ---
 
-## 輸出檔案
+## 核心架構改動詳解
+
+### RT-D1：OUI嵌入表（零外部洩漏）
 
 ```
-NetFreak_20260218_1031.log        ← 完整文字 log（每次必產生）
-NetFreak_20260218_1031.html       ← 暗色 HTML 報告（-Html 才產生）
+v1.0：  MAC → macvendors.com API → 廠商名稱  [洩漏內部MAC]
+v1.1：  MAC → 本地$OUI雜湊表(300廠商) → 廠商名稱  [零外部呼叫]
+
+$OUI = @{
+    "001E65" = "Nokia"
+    "001349" = "Zyxel"
+    "001A2F" = "Cisco"
+    ...  (300 entries, IEEE public OUI registry)
+}
 ```
 
----
-
-## 各區段說明
-
-| # | 區段 | 獨家功能 | 耗時估計 |
-|---|------|---------|---------|
-| 1 | Full IP Stack | U8雙網卡衝突, U9 ARP地圖 | 5s |
-| 2 | DHCP Deep Dive | Lease時間分析, 到期警告 | 3s |
-| 3 | Gateway Analysis | U7 MAC廠商查詢 | 5s |
-| 4 | Port Security Audit | 16 Port + 資安扣分 | 60–120s |
-| 5 | DNS + Leak Test | U2跨5個resolver比對 | 15s |
-| 6 | Internet + ASN | U3 BGP/Geo/威脅評分 | 10s |
-| 7 | Latency + MOS | U4 ITU-T G.107評分 | 60–120s |
-| 8 | MTU Discovery | U1 二元搜尋 | 30–60s |
-| 9 | Bandwidth | 多源備援下載測速 | 15–30s |
-| 10 | IPv6 Audit | U10 公網暴露偵測 | 20s |
-| 11 | UPnP Audit | U6 SSDP發現+Port映射 | 10s |
-| 12 | IGMP/Multicast | U5 CHT MOD驗證 | 5s |
-| 13 | Process Map | PID→程式名稱+連線統計 | 5s |
-| 14 | WiFi Analysis | RSSI/Channel/鄰近網路 | 5s |
-| 15 | Security Score | U11 A–F評分+建議清單 | <1s |
-| 16 | HTML Report | U12 自包含暗色報告 | <1s |
-
-**總計約 4–8 分鐘**（含所有慢速測試）
+**覆蓋廠商**：Apple / Cisco / Nokia / Zyxel / Alcatel-Lucent / ASUS / Intel / TP-Link / D-Link / Netgear / Belkin / VMware / Samsung / Realtek / Microsoft / Broadcom / Arcadyan 等300筆。
 
 ---
 
-## 資安評分說明（U11）
+### RT-D1：外部API明確opt-in
 
-### 扣分項目
-
-| 事件 | 扣分 |
-|------|------|
-| Port 23 Telnet OPEN | -20 |
-| Port 21 FTP OPEN | -10 |
-| Port 5555 ADB OPEN | -20 |
-| Port 161 SNMP OPEN | -10 |
-| DNS 洩漏偵測 | -15 |
-| IPv6 未設防火牆 | -8 |
-| UPnP 已啟用 | -8 |
-| 多 Gateway 衝突 | -10 |
-| 封包遺失 >5% | -10 |
-| Jitter >20ms | -5 |
-| MOS <3.6 | -5 |
-| DHCP Lease <2h | -5 |
-
-### 評分等級
-
-| 分數 | 等級 | 說明 |
-|------|------|------|
-| 90–100 | **A** | 優良，無顯著問題 |
-| 80–89 | **B** | 良好，有小問題 |
-| 70–79 | **C** | 尚可，建議處理 |
-| 60–69 | **D** | 警告，有重要問題 |
-| <60 | **F** | 危險，立即處理 |
-
----
-
-## MOS 分數說明（U4）
-
-MOS（Mean Opinion Score）= 語音/視訊通話品質的標準量化指標，由 ITU-T G.107 E-model 計算。
-
-| MOS | 等級 | 對應體感 |
-|-----|------|---------|
-| 4.3–5.0 | A Excellent | 通話/MOD 完美無瑕 |
-| 4.0–4.3 | B Good | 偶有輕微延遲，可接受 |
-| 3.6–4.0 | C Fair | 明顯但可用 |
-| 3.1–3.6 | D Poor | 頻繁雜音/卡頓 |
-| <3.1 | F Bad | 無法使用 |
-
-CHT FTTH 正常環境應達 **MOS ≥ 4.3（A 級）**。
-
----
-
-## MTU 發現說明（U1）
-
-使用 `ping.exe -f -l` 二元搜尋最佳封包大小：
-
-| MTU | 代表意義 |
-|-----|---------|
-| 1500 | 標準乙太網路，最佳 |
-| 1492 | CHT FTTH PPPoE 正常值（-8 byte PPPoE overhead）|
-| 1480 | 可能有 VPN tunnel 或額外封裝 |
-| <1400 | 異常，可能影響吞吐量 |
-
----
-
-## DNS 洩漏測試說明（U2）
-
-同時查詢 CHT / Google / Cloudflare / Quad9 / TWNIC 五個 resolver，要求各自回報「看到你是誰」。
-
-- **全部相同** → 無洩漏 ✅
-- **結果不同** → 可能 DNS 劫持、CHT DNS 透明代理、或 VPN 分流 ⚠️
-
----
-
-## 常見問題 FAQ
-
-**Q1：執行時間太長？**
-加 `-SkipSlow` 跳過 MTU/UPnP/IPv6，總時間縮至 2–3 分鐘。
-
-**Q2：Port Scan 很慢？**
-每個 Port 預設等待 TCP timeout（約 5s），16 個 Port 最多需 80s。屬正常行為。
-
-**Q3：MAC 廠商查不到？**
-`api.macvendors.com` 有 Rate Limit，離線或達限時自動跳過，非錯誤。
-
-**Q4：UPnP 沒發現設備？**
-G-040G-Q 預設可能停用 UPnP，或防火牆阻擋 UDP 1900，都屬正常。
-
-**Q5：HTML 報告在哪裡？**
-與 `.ps1` 同一目錄，檔名 `NetFreak_<timestamp>.html`，直接用瀏覽器開啟。
-
-**Q6：PktMon.etl 出現在目錄怎麼辦？**
 ```powershell
-pktmon stop                                     # 停止擷取
-pktmon etl2pcap PktMon.etl -o PktMon.pcapng   # 轉 Wireshark 格式
+# v1.0行為（自動送出）：
+$ipInfo = Invoke-RestMethod "https://ipinfo.io/json"  # 自動執行
+
+# v1.1行為（明確opt-in）：
+function Invoke-ExternalAPI {
+    if (-not $AllowExternalAPI) {
+        Info "BLOCKED: $Purpose (add -AllowExternalAPI)"
+        return $null          # 不呼叫，資料不出去
+    }
+    ...
+}
+```
+
+**預設行為**：所有外部API均不呼叫，輸出提示「add -AllowExternalAPI to enable」。
+
+---
+
+### RT-D2：Stealth模式
+
+```powershell
+$scanDelay   = if ($Stealth) { 500  } else { 0   }   # ms probe間距
+$scanTimeout = if ($Stealth) { 2000 } else { 5000 }  # TCP timeout
+
+# SSDP在Stealth模式完全跳過：
+if ($Stealth) { Skip "UPnP SSDP (RT-D2: disabled in Stealth)"; return }
+
+# TCPTest函數加入delay：
+function TCPTest { ...
+    if ($Stealth) { Start-Sleep -Milliseconds $scanDelay }
+    ...
+}
 ```
 
 ---
 
-## 注意事項
+### RT-D3：MTU安全探測（舊ONT保護）
 
-- 本腳本為**唯讀診斷**，不修改任何設定。
-- Port Scan 僅 TCP 連線測試，非滲透測試工具。
-- MAC 廠商 / ASN / 威脅情報需要網際網路連線。
-- 頻寬測試下載 1–10MB，計費網路請注意。
-- 建議**不對公網 IP 執行**，Port Scan 可能觸發對方防火牆。
-- `-Monitor` 模式持續消耗 CPU/網路，長時間使用請注意。
+```
+v1.0：  搜尋範圍576-1500，單次probe
+v1.1：  搜尋範圍1000-1500（避免576-1000的大量ICMP碎片）
+        3次probe取多數決（≥2/3才判定OK）
+        降低單次ICMP burst對舊ONT的衝擊
+```
 
 ---
 
-*NetFreak.ps1 — v1.0 / 2026-02-18 — No install. No bullshit. Full control.*
+### RT-U11：CVSS v3.1對齊安全評分
+
+```powershell
+# v1.0（主觀）：
+SecDeduct 20 "Telnet OPEN"
+
+# v1.1（CVSS + MITRE對齊）：
+SecDeduct 20 "Port 23 Telnet OPEN" `
+           "AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H" `   # CVSS向量
+           "T1021.004"                                    # MITRE TTP
+```
+
+**CVSS嚴重度對應扣分**：
+
+| CVSS Severity | 扣分 | 對應MITRE TTP（部分）|
+|---------------|------|---------------------|
+| CRITICAL (9.0+) | -20 | T1219, T1021.004 |
+| HIGH (7.0-8.9) | -10 | T1040, T1071.002 |
+| MEDIUM (4.0-6.9) | -5 | T1135, T1090 |
+| LOW | 0 | — |
+
+---
+
+### RT-U4：改進MOS E-model
+
+```
+v1.0（簡化，偏差10-20%）：
+  Ie = 30 * loss / (loss + 5)
+
+v1.1（codec-aware完整E-model）：
+  $codecTable = @{
+    "G.711" = @{Ie=0;  Bpl=25.1}   # POTS標準
+    "G.729" = @{Ie=11; Bpl=19}     # 壓縮語音
+    "G.722" = @{Ie=0;  Bpl=34}     # HD語音
+  }
+  Ie = cIe + (100-cIe) * (loss / (loss + Bpl))
+  R  = 93.2 - Id - Ie
+  MOS = 1 + 0.035R + 7e-6 * R(R-60)(100-R)
+```
+
+---
+
+### RT-U2：TTL感知DNS洩漏測試
+
+```
+v1.0：只比對5個resolver的IP是否一致
+
+v1.1：
+  1. 比對IP一致性（同v1.0）
+  2. 比對TTL值 -- TTL spread > 30s → cache poisoning警告
+  3. TTL差異可區分：
+     - 正常的CDN差異（TTL相近但IP略不同）
+     - 真正的DNS劫持（TTL異常高 = ISP緩存/MITM）
+```
+
+---
+
+### U14：新增 Process+User 特權稽核
+
+```powershell
+# 取得程序+使用者名稱
+$procs = Get-Process -IncludeUserName | Where-Object { $_.UserName }
+
+# 標記高權限帳號的網路程序
+$elevated = $procs | Where-Object {
+    $_.UserName -match "Administrator|SYSTEM|Domain Admins|NT AUTHORITY"
+}
+
+# 若Admin程序連線數>10 → 安全扣分 + MITRE T1078
+```
+
+---
+
+## 各區段 v1.1 變更速覽
+
+| # | 區段 | v1.0 | v1.1變更 |
+|---|------|------|---------|
+| 1 | IP Stack | ARP無廠商 | ARP附embedded OUI廠商 |
+| 3 | Gateway | MAC→外部API | MAC→本地OUI表 |
+| 4 | Port Scan | 無CVSS | 每Port附CVSS向量+MITRE TTP |
+| 4 | Port Scan | 固定速度 | Stealth模式500ms間距 |
+| 5 | DNS Leak | IP比對 | IP+TTL比對，TTL spread偵測 |
+| 6 | Internet | 自動呼叫ipinfo | 需-AllowExternalAPI opt-in |
+| 7 | MOS | 簡化公式 | Codec表E-model |
+| 8 | MTU | 576-1500單probe | 1000-1500，3probe多數決 |
+| 11 | UPnP | 永遠執行 | Stealth模式跳過 |
+| 13 | Process | 只有PID+Name | — |
+| **14** | **Process+User** | **不存在** | **新增：IncludeUserName+特權標記** |
+| 16 | Security Score | 主觀扣分 | CVSS v3.1對齊 |
+
+---
+
+## 紅隊稽核對話摘要
+
+原稽核的核心批評與回應：
+
+> **「將內部網段MAC傳送至macvendors.com是在為受害者繪製精確地圖。」**
+> → v1.1：MAC永不離機，嵌入OUI表300廠商覆蓋率。
+
+> **「M-SEARCH多播掃描與全Port TCP掃描是SOC監控報警的第一順位。」**
+> → v1.1：`-Stealth`旗標停用SSDP、TCP間距500ms，降低行為特徵。
+
+> **「安全評分[U11]的加權純屬主觀臆斷，缺乏CVSS或MITRE ATT&CK的映射支持。」**
+> → v1.1：每條SecDeduct附CVSS v3.1向量字串+MITRE TTP編號。
+
+> **「最簡解釋：這是一個PowerShell命令包裝器，而非獨家診斷算法。」**
+> → **承認**：NetFreak確實是高品質包裝器。OUI嵌入表、TTL-aware DNS、E-model MOS屬原創組合，但底層仍依賴系統命令。Occam正確。
+
+---
+
+## 仍存在的已知限制
+
+| 限制 | 說明 | 解法方向 |
+|------|------|---------|
+| `netsh`/`netstat`可被Rootkit偽造 | 用戶空間工具無法抵抗Kernel-level hooking | 需ETW/WFP kernel callback（超出PS範圍）|
+| OUI表覆蓋率~300廠商 | 新品牌或ODM可能顯示Unknown | 定期更新或擴充至2000+筆 |
+| MOS為單向估算 | 缺少實際VoIP協商資料 | 需RTCP SR/RR封包分析 |
+| `-AllowExternalAPI`用戶仍需自評風險 | 無法強制保護選擇允許的用戶 | 加warning + 確認提示 |
+
+---
+
+*NetFreak.ps1 v1.1 — Red Team Hardened | 2026-02-18*
+*「工具的誠實在於承認它是什麼，而不是假裝它是它不是的東西。」*
