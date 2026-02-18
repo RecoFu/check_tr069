@@ -81,7 +81,7 @@ $OUI = @{
     "001247"="Samsung";"001377"="Samsung";"0015B9"="Samsung"
     "001632"="Samsung";"001699"="Samsung";"001A8A"="Samsung"
     "001BFB"="Samsung";"001C62"="Samsung";"001D25"="Samsung"
-    "001DF6"="Samsung";"001F CC"="Samsung"
+    "001DF6"="Samsung";"001FCC"="Samsung"
     "0021D1"="Samsung";"002339"="Samsung";"0023D6"="Samsung"
     "002490"="Samsung";"0025BB"="Samsung";"00265D"="Samsung"
     "0026E2"="Samsung"
@@ -145,8 +145,7 @@ function Get-OUIVendor {
     $oui = ($mac -replace "[:\-\.]","").ToUpper()
     if ($oui.Length -lt 6) { return "Unknown" }
     $key = $oui.Substring(0,6)
-    if ($OUI.ContainsKey($key)) { return $OUI[$key] }
-    # Try first 3 bytes with common prefixes
+    if ($script:OUI -is [hashtable] -and $script:OUI.ContainsKey($key)) { return $script:OUI[$key] }
     return "Unknown (OUI: $key)"
 }
 
@@ -164,7 +163,7 @@ function Section {
     Log ""; Log ("=" * 62) "Cyan"
     Log "  $title  $uid" "Cyan"
     Log ("=" * 62) "Cyan"
-    if ($Html) { [void]$htmlBody.Append("<section><h2>$([System.Web.HttpUtility]::HtmlEncode($title)) <span class='uid'>$uid</span></h2>") }
+    if ($Html) { [void]$htmlBody.Append("<section><h2>$(("$title") -replace '&','&amp;' -replace '<','&lt;' -replace '>','&gt;') <span class='uid'>$uid</span></h2>") }
 }
 function EndSection { if ($Html) { [void]$htmlBody.Append("</section>") } }
 function Result {
@@ -176,10 +175,11 @@ function Result {
     Log $out $col
     if ($Html) {
         $cls = if ($ok) { "ok" } else { "warn" }
+        $esc = { param($s) ("$s") -replace '&','&amp;' -replace '<','&lt;' -replace '>','&gt;' -replace '"','&quot;' }
         [void]$htmlBody.Append(
-            "<div class='row $cls'><span class='lbl'>$([System.Web.HttpUtility]::HtmlEncode($label))</span>" +
-            "<span class='icon'>$icon</span><span class='val'>$([System.Web.HttpUtility]::HtmlEncode("$value"))</span>" +
-            $(if ($note) { "<span class='note'>$([System.Web.HttpUtility]::HtmlEncode($note))</span>" }) +
+            "<div class='row $cls'><span class='lbl'>$(& $esc $label)</span>" +
+            "<span class='icon'>$icon</span><span class='val'>$(& $esc "$value")</span>" +
+            $(if ($note) { "<span class='note'>$(& $esc $note)</span>" }) +
             "</div>"
         )
     }
@@ -896,14 +896,20 @@ $wifiAdapters = Get-NetAdapter | Where-Object {
 if ($wifiAdapters) {
     $wlanInfo = netsh wlan show interfaces 2>$null
     if ($wlanInfo) {
-        $ssid   = ($wlanInfo | Select-String "^\s+SSID\s+:" | Select-Object -First 1) -replace ".*:\s*",""
-        $signal = ($wlanInfo | Select-String "Signal") -replace ".*:\s*",""
-        $radio  = ($wlanInfo | Select-String "Radio type") -replace ".*:\s*",""
-        $chan   = ($wlanInfo | Select-String "Channel") -replace ".*:\s*",""
-        $rxRate = ($wlanInfo | Select-String "Receive rate") -replace ".*:\s*",""
-        $txRate = ($wlanInfo | Select-String "Transmit rate") -replace ".*:\s*",""
+        $ssid   = ($wlanInfo | Select-String "^\s+SSID\s+:" | Select-Object -First 1).ToString() -replace ".*:\s*",""
+        $sigObj  = $wlanInfo | Select-String "Signal"        | Select-Object -First 1
+        $radObj  = $wlanInfo | Select-String "Radio type"    | Select-Object -First 1
+        $chanObj = $wlanInfo | Select-String "Channel"       | Select-Object -First 1
+        $rxObj   = $wlanInfo | Select-String "Receive rate"  | Select-Object -First 1
+        $txObj   = $wlanInfo | Select-String "Transmit rate" | Select-Object -First 1
+        $signal  = if ($sigObj)  { $sigObj.ToString()  -replace ".*:\s*","" } else { "N/A" }
+        $radio   = if ($radObj)  { $radObj.ToString()  -replace ".*:\s*","" } else { "N/A" }
+        $chan    = if ($chanObj) { $chanObj.ToString() -replace ".*:\s*","" } else { "N/A" }
+        $rxRate  = if ($rxObj)   { $rxObj.ToString()   -replace ".*:\s*","" } else { "N/A" }
+        $txRate  = if ($txObj)   { $txObj.ToString()   -replace ".*:\s*","" } else { "N/A" }
         Result "SSID"      $ssid.Trim()
-        Result "Signal"    $signal.Trim() ($signal -match "[7-9]\d|100")
+        $sigGood = $signal -match "[7-9]\d|100"
+        Result "Signal"    $signal.Trim() $sigGood
         Result "Radio"     $radio.Trim()
         Result "Channel"   $chan.Trim()
         Result "RX/TX"     "$($rxRate.Trim()) / $($txRate.Trim())"
@@ -999,9 +1005,265 @@ $($htmlBody.ToString())
 
 
 # ==============================================================================
-# FOOTER
+# DIAGNOSTIC SUMMARY / CONCLUSION
 # ==============================================================================
 $totalSec = [Math]::Round(((Get-Date) - $startTime).TotalSeconds, 1)
+
+Log ""
+Log ("=" * 62) "White"
+Log "  NETFREAK DIAGNOSTIC SUMMARY" "White"
+Log ("=" * 62) "White"
+Log "  Generated : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" "White"
+Log "  Host      : $env:COMPUTERNAME  |  Duration: ${totalSec}s" "White"
+Log ("=" * 62) "White"
+
+# ── [A] Network Topology ─────────────────────────────────────────────────────
+Log ""
+Log "  [A] NETWORK TOPOLOGY" "Cyan"
+Log ("  " + "-" * 58) "White"
+
+$allIPs = Get-NetIPConfiguration | Where-Object { $_.IPv4Address }
+foreach ($a in $allIPs) {
+    $ip  = $a.IPv4Address.IPAddress
+    $pre = $a.IPv4Address.PrefixLength
+    $gw  = if ($a.IPv4DefaultGateway.NextHop) { $a.IPv4DefaultGateway.NextHop } else { "none" }
+    Log ("  Adapter [{0}]" -f $a.InterfaceAlias) "White"
+    Log ("    IP      : $ip / $pre") "Gray"
+    Log ("    Gateway : $gw") "Gray"
+    Log ("    DNS     : {0}" -f ($a.DNSServer.ServerAddresses -join ", ")) "Gray"
+}
+
+# ARP device count
+$arpCount = (arp -a 2>$null | Where-Object { $_ -match "dynamic" }).Count
+Log ("  LAN Devices (ARP dynamic) : $arpCount") "Gray"
+
+if ($gwCandidates.Count -gt 1) {
+    Log "  [!!] DUAL GATEWAY DETECTED -- routing conflict risk" "Yellow"
+} else {
+    Log "  [OK] Single gateway -- no routing conflict" "Green"
+}
+
+# ── [B] Connectivity Quality ──────────────────────────────────────────────────
+Log ""
+Log "  [B] CONNECTIVITY QUALITY" "Cyan"
+Log ("  " + "-" * 58) "White"
+
+# Re-evaluate from collected data via a quick ping snapshot
+$quickPings = @()
+foreach ($t in @("168.95.1.1","8.8.8.8","1.1.1.1")) {
+    $p = Test-NetConnection -ComputerName $t -WarningAction SilentlyContinue
+    if ($p.PingSucceeded) { $quickPings += $p.PingReplyDetails.RoundtripTime }
+}
+if ($quickPings.Count -gt 0) {
+    $avgPing = [Math]::Round(($quickPings | Measure-Object -Average).Average, 1)
+    $maxPing = ($quickPings | Measure-Object -Maximum).Maximum
+    $connOK  = $avgPing -lt 50 -and $quickPings.Count -eq 3
+
+    $connStatus = if ($avgPing -lt 20)  { "EXCELLENT" }
+                  elseif ($avgPing -lt 50)  { "GOOD" }
+                  elseif ($avgPing -lt 100) { "FAIR" }
+                  else                      { "POOR" }
+
+    $connCol = if ($connStatus -match "EXCELLENT|GOOD") { "Green" } else { "Yellow" }
+    Log ("  Internet Ping (3 targets) : {0}ms avg / {1}ms max  [{2}]" -f $avgPing, $maxPing, $connStatus) $connCol
+    $reachCol = if ($quickPings.Count -eq 3) { "Green" } else { "Yellow" }
+    Log ("  Reachable targets : {0}/3" -f $quickPings.Count) $reachCol
+} else {
+    Log "  [!!] Internet connectivity FAILED -- all targets unreachable" "Red"
+}
+
+# MTU status from earlier (read from log)
+$mtuLine = Get-Content $logFile | Select-String "Optimal MTU" | Select-Object -Last 1
+if ($mtuLine) {
+    Log ("  MTU Result : {0}" -f ($mtuLine -replace ".*\] *","")) "Gray"
+}
+
+# Bandwidth from log
+$bwLine = Get-Content $logFile | Select-String "Download Speed|Download \[" | Select-Object -Last 1
+if ($bwLine) {
+    Log ("  Bandwidth  : {0}" -f ($bwLine -replace ".*\[OK\] *|\[!!\] *","")) "Gray"
+}
+
+# MOS from log
+$mosLine = Get-Content $logFile | Select-String "MOS \[" | Select-Object -First 1
+if ($mosLine) {
+    $mosVal  = if ($mosLine -match "([\d\.]+) / 5\.0") { $matches[1] } else { "N/A" }
+    $mosGrad = if ($mosLine -match "\[([A-F] \w+)\]") { $matches[1] } else { "" }
+    $mosCol  = if ($mosVal -as [double] -ge 4.0) { "Green" } else { "Yellow" }
+    Log ("  VoIP/MOD Quality (MOS) : $mosVal / 5.0  [$mosGrad]") $mosCol
+}
+
+# ── [C] DNS Health ────────────────────────────────────────────────────────────
+Log ""
+Log "  [C] DNS HEALTH" "Cyan"
+Log ("  " + "-" * 58) "White"
+
+$dnsOK  = @()
+$dnsFail= @()
+foreach ($d in @("google.com","hinet.net","github.com")) {
+    try {
+        Resolve-DnsName $d -ErrorAction Stop -WarningAction SilentlyContinue | Out-Null
+        $dnsOK += $d
+    } catch { $dnsFail += $d }
+}
+$dnsCol = if ($dnsFail.Count -eq 0) { "Green" } else { "Gray" }
+Log ("  Resolved OK  : {0}" -f ($dnsOK -join ", ")) $dnsCol
+if ($dnsFail.Count -gt 0) {
+    Log ("  [!!] Failed  : {0}" -f ($dnsFail -join ", ")) "Yellow"
+}
+
+# DNS leak result from log
+$leakLine = Get-Content $logFile | Select-String "DNS Leak \[U2\]" | Select-Object -Last 1
+if ($leakLine) {
+    $leakOK  = $leakLine -match "CLEAN"
+    $leakMsg = if ($leakOK) { "CLEAN -- no hijacking detected" } else { "INCONSISTENT -- possible hijacking" }
+    $leakCol = if ($leakOK) { "Green" } else { "Red" }
+    Log ("  DNS Leak Test : {0}" -f $leakMsg) $leakCol
+}
+
+# ── [D] Port Security ────────────────────────────────────────────────────────
+Log ""
+Log "  [D] PORT SECURITY (Gateway: $GW)" "Cyan"
+Log ("  " + "-" * 58) "White"
+
+# Re-read open ports from log
+$openFromLog = Get-Content $logFile | Select-String "OPEN\s+\[Severity" | ForEach-Object {
+    if ($_ -match "Port\s+(\d+)\s+(.+?)\s+OPEN\s+\[Severity:\s*(\w+)\]") {
+        [PSCustomObject]@{ Port=$matches[1]; Desc=$matches[2].Trim(); Sev=$matches[3] }
+    }
+}
+
+if ($openFromLog) {
+    $critical = $openFromLog | Where-Object { $_.Sev -eq "CRITICAL" }
+    $high     = $openFromLog | Where-Object { $_.Sev -eq "HIGH" }
+    $medium   = $openFromLog | Where-Object { $_.Sev -eq "MEDIUM" }
+    $info     = $openFromLog | Where-Object { $_.Sev -eq "INFO" }
+
+    if ($critical) {
+        Log ("  [CRITICAL] {0}" -f (($critical | ForEach-Object { "Port $($_.Port) $($_.Desc)" }) -join ", ")) "Red"
+    }
+    if ($high) {
+        Log ("  [HIGH]     {0}" -f (($high | ForEach-Object { "Port $($_.Port) $($_.Desc)" }) -join ", ")) "Red"
+    }
+    if ($medium) {
+        Log ("  [MEDIUM]   {0}" -f (($medium | ForEach-Object { "Port $($_.Port) $($_.Desc)" }) -join ", ")) "Yellow"
+    }
+    if ($info) {
+        Log ("  [INFO]     {0}" -f (($info | ForEach-Object { "Port $($_.Port) $($_.Desc)" }) -join ", ")) "Gray"
+    }
+} else {
+    Log "  [OK] No unexpected ports open on gateway" "Green"
+}
+
+# Telnet check
+$telnetOpen = $openFromLog | Where-Object { $_.Port -eq "23" }
+if ($telnetOpen) {
+    Log "  [!!] CRITICAL: Telnet (Port 23) is OPEN -- contact ISP to close immediately" "Red"
+}
+
+# ── [E] IPv6 / UPnP / IGMP ──────────────────────────────────────────────────
+Log ""
+Log "  [E] ADDITIONAL SECURITY CHECKS" "Cyan"
+Log ("  " + "-" * 58) "White"
+
+$upnpLine = Get-Content $logFile | Select-String "UPnP Devices \[U6\]" | Select-Object -Last 1
+if ($upnpLine) {
+    $upnpOK  = $upnpLine -match "None"
+    $upnpMsg = if ($upnpOK) { "No devices (UPnP disabled or blocked)" } else { "$upnpLine" -replace ".*\[!!\] *","" }
+    $upnpCol = if ($upnpOK) { "Green" } else { "Yellow" }
+    Log ("  UPnP Audit : {0}" -f $upnpMsg) $upnpCol
+}
+
+$v6Line = Get-Content $logFile | Select-String "IPv6 Global \[U10\]|IPv6 Global\s" | Select-Object -Last 1
+if ($v6Line) {
+    Log ("  IPv6 Status : {0}" -f ($v6Line -replace ".*OK\] *|.*!!\] *","")) "Gray"
+}
+
+$igmpLine = Get-Content $logFile | Select-String "IGMP Groups \[U5\]|CHT MOD IGMP" | Select-Object -Last 1
+if ($igmpLine) {
+    Log ("  IGMP/MOD   : {0}" -f ($igmpLine -replace ".*OK\] *|.*!!\] *","")) "Gray"
+}
+
+# ── [F] Top Processes ────────────────────────────────────────────────────────
+Log ""
+Log "  [F] TOP NETWORK PROCESSES" "Cyan"
+Log ("  " + "-" * 58) "White"
+
+$procLines = Get-Content $logFile | Select-String "PID.*connections" |
+    Select-Object -Last 8
+foreach ($pl in $procLines) {
+    Log ("  {0}" -f ($pl -replace ".*\d\d:\d\d:\d\d\] *","")) "Gray"
+}
+
+# ── [G] Security Score Breakdown ────────────────────────────────────────────
+Log ""
+Log "  [G] SECURITY ASSESSMENT" "Cyan"
+Log ("  " + "-" * 58) "White"
+
+$secScore = [Math]::Max(0, $secScore)
+$gradeBar = switch ($true) {
+    { $secScore -ge 90 } { "A  [##########]" }
+    { $secScore -ge 80 } { "B  [########--]" }
+    { $secScore -ge 70 } { "C  [######----]" }
+    { $secScore -ge 60 } { "D  [####------]" }
+    default              { "F  [##--------]" }
+}
+$gradeCol2 = if ($grade -match "A|B") { "Green" } elseif ($grade -match "C|D") { "Yellow" } else { "Red" }
+
+Log ("  Score : {0}/100   Grade : {1}" -f $secScore, $gradeBar) $gradeCol2
+Log ""
+
+if ($secIssues.Count -gt 0) {
+    Log "  Issues (ordered by severity):" "Yellow"
+    $secIssues | Sort-Object { if ($_ -match "\-(\d+)\]") { [int]$matches[1] } else { 0 } } -Descending |
+    ForEach-Object { Log ("    $_") "Yellow" }
+}
+if ($secGood.Count -gt 0) {
+    Log ""; Log "  Passed checks:" "Green"
+    $secGood | ForEach-Object { Log ("    $_") "Green" }
+}
+
+# ── [H] Recommendations ─────────────────────────────────────────────────────
+Log ""
+Log "  [H] RECOMMENDATIONS" "Cyan"
+Log ("  " + "-" * 58) "White"
+
+$recNum = 1
+$recs   = @()
+
+# Auto-generate recommendations from findings
+if ($telnetOpen)                       { $recs += "Contact CHT/ISP to disable Telnet (Port 23) on ONT immediately" }
+if ($secIssues | Where-Object { $_ -match "UPnP" })  { $recs += "Disable UPnP on ONT/Router -- use manual port forwarding instead" }
+if ($secIssues | Where-Object { $_ -match "IPv6" })  { $recs += "Enable IPv6 stateful firewall on router to prevent direct IPv6 exposure" }
+if ($secIssues | Where-Object { $_ -match "DNS" })   { $recs += "Investigate DNS inconsistency -- possible CHT transparent proxy or DNS hijacking" }
+if ($secIssues | Where-Object { $_ -match "[Ll]oss" }) { $recs += "Check ONT/cables for packet loss -- consider CHT line quality report" }
+if ($secIssues | Where-Object { $_ -match "[Jj]itter" }) { $recs += "High jitter detected -- check for WiFi interference or ONT overheating" }
+if ($secIssues | Where-Object { $_ -match "[Mm]ultiple.*gateway" }) { $recs += "Resolve dual-gateway routing conflict -- check NIC metrics with: route print" }
+if ($secIssues | Where-Object { $_ -match "[Ll]ease.*2h" })  { $recs += "DHCP lease expiring soon -- renew with: ipconfig /renew" }
+if ($avgPing -and $avgPing -gt 80)     { $recs += "High latency to public DNS -- verify PPPoE session and ONT status" }
+
+# Always-on recommendations
+if (-not $AllowExternalAPI) { $recs += "Run with -AllowExternalAPI for full ASN/Geo/Threat intelligence analysis" }
+if ($SkipSlow)              { $recs += "Run without -SkipSlow for complete MTU/IPv6/UPnP audit" }
+if (-not $Html)             { $recs += "Run with -Html for full visual HTML dashboard report" }
+if ($recs.Count -eq 0)     { $recs += "No critical recommendations -- network environment looks healthy" }
+
+foreach ($r in $recs) {
+    $recCol = if ($recNum -le ($recs.Count - 3)) { "Yellow" } else { "Gray" }
+    Log ("  {0:D2}. {1}" -f $recNum, $r) $recCol
+    $recNum++
+}
+
+# ── Footer ───────────────────────────────────────────────────────────────────
+Log ""
+Log ("=" * 62) "White"
+Log ("  END OF SUMMARY") "White"
+Log ("=" * 62) "White"
+
+
+# ==============================================================================
+# FOOTER
+# ==============================================================================
 Log ""; Log ("=" * 62) "Cyan"
 Log "  NetFreak COMPLETE" "Cyan"
 Log "  Log    : $((Get-Item $logFile).FullName)" "Cyan"
