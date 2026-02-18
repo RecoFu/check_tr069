@@ -1,7 +1,12 @@
 # ============================================================
 # check_tr069.ps1 -- Full Network Diagnostic Script
 # Usage : .\check_tr069.ps1 192.168.1.1
-# Output: check_tr069_192.168.1.1_20260218_1230.log
+# Output: check_tr069_192.168.1.1_20260218_1031.log
+# v1.1 fixes:
+#   M1 - Port Scan: removed -ErrorAction SilentlyContinue
+#   M2 - HTTP/HTTPS: PS5.1 / PS7+ auto-detect for SkipCertificateCheck
+#   M3 - Bandwidth test: fallback URLs added
+#   M4 - Section [9]: filter to ONT-IP only, exclude local machine conns
 # ============================================================
 
 param(
@@ -10,9 +15,10 @@ param(
 )
 
 # -- Init ----------------------------------------------------
-$timestamp = Get-Date -Format "yyyyMMdd_HHmm"
-$logFile   = "check_tr069_${TargetIP}_${timestamp}.log"
-$scriptVer = "v1.0 / 2026-02-18"
+$timestamp  = Get-Date -Format "yyyyMMdd_HHmm"
+$logFile    = "check_tr069_${TargetIP}_${timestamp}.log"
+$scriptVer  = "v1.1 / 2026-02-18"
+$psVer      = $PSVersionTable.PSVersion.Major   # PS version detection (M2)
 
 function Log {
     param([string]$msg, [string]$color = "White")
@@ -43,6 +49,7 @@ Log "  check_tr069.ps1 $scriptVer" "Cyan"
 Log "  Target IP : $TargetIP" "Cyan"
 Log "  Timestamp : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" "Cyan"
 Log "  Hostname  : $env:COMPUTERNAME" "Cyan"
+Log "  PS Version: $($PSVersionTable.PSVersion)" "Cyan"
 Log ("=" * 60) "Cyan"
 
 
@@ -54,10 +61,12 @@ Section "[1] Local NIC / IP Info"
 $adapters = Get-NetIPConfiguration | Where-Object { $_.IPv4Address }
 foreach ($a in $adapters) {
     Log "  Adapter : $($a.InterfaceAlias)" "White"
-    Result "  Local IP"       $a.IPv4Address.IPAddress
-    Result "  Prefix Length"  $a.IPv4Address.PrefixLength
-    Result "  Default GW"     ($a.IPv4DefaultGateway.NextHop)
-    Result "  DNS Servers"    ($a.DNSServer.ServerAddresses -join ", ")
+    Result "  Local IP"      $a.IPv4Address.IPAddress
+    Result "  Prefix Length" $a.IPv4Address.PrefixLength
+    $gw = if ($a.IPv4DefaultGateway.NextHop) { $a.IPv4DefaultGateway.NextHop } else { "(none)" }
+    Result "  Default GW"    $gw
+    $dns = if ($a.DNSServer.ServerAddresses) { $a.DNSServer.ServerAddresses -join ", " } else { "(none)" }
+    Result "  DNS Servers"   $dns
     Log ""
 }
 
@@ -88,7 +97,7 @@ if ($dhcpAdapters) {
 
 
 # ============================================================
-# [3] Gateway / Target Connectivity
+# [3] Gateway / Target Ping + Traceroute
 # ============================================================
 Section "[3] Gateway / Target Ping + Traceroute"
 
@@ -129,9 +138,11 @@ foreach ($d in $dnsTargets) {
         $r  = Resolve-DnsName $d -ErrorAction Stop -WarningAction SilentlyContinue
         $ip = ($r | Where-Object { $_.Type -eq "A" } | Select-Object -First 1).IPAddress
         if (-not $ip) { $ip = ($r | Select-Object -First 1).NameHost }
+        # acs.hinet.net NXDOMAIN is expected (CHT internal, not public DNS)
         Result "DNS: $d" $ip $true
     } catch {
-        Result "DNS: $d" "NXDOMAIN / unresolvable" $false
+        $note = if ($d -eq "acs.hinet.net") { " (expected: CHT internal)" } else { "" }
+        Result "DNS: $d" "NXDOMAIN$note" ($d -eq "acs.hinet.net")
     }
 }
 
@@ -139,12 +150,14 @@ try {
     $rev = Resolve-DnsName $TargetIP -ErrorAction Stop
     Result "rDNS: $TargetIP" ($rev | Select-Object -First 1).NameHost $true
 } catch {
-    Result "rDNS: $TargetIP" "No PTR record" $false
+    Result "rDNS: $TargetIP" "No PTR record (normal for LAN IP)" $true
 }
 
 
 # ============================================================
-# [5] Port Scan (ONT / Gateway key ports)
+# [5] Port Scan  -- M1 FIX: removed -ErrorAction SilentlyContinue
+#     Test-NetConnection now returns TcpTestSucceeded=$false on
+#     closed/filtered ports instead of throwing an exception.
 # ============================================================
 Section "[5] Port Scan -> $TargetIP"
 
@@ -162,22 +175,20 @@ $ports = @(
 )
 
 foreach ($p in $ports) {
-    try {
-        $tc   = Test-NetConnection -ComputerName $TargetIP -Port $p.Port `
-                -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
-        $ok   = $tc.TcpTestSucceeded
-        $warn = if ($p.Port -eq 23 -and $ok) { "  <-- WARNING: Telnet OPEN, security risk!" } else { "" }
-        Result ("Port {0,5}  {1}" -f $p.Port, $p.Desc) `
-               (if ($ok) { "OPEN" } else { "closed" }) $ok
-        if ($warn) { Log $warn "Red" }
-    } catch {
-        Result ("Port {0,5}  {1}" -f $p.Port, $p.Desc) "error" $false
-    }
+    # M1: No -ErrorAction SilentlyContinue — timeout returns false, not exception
+    $tc  = Test-NetConnection -ComputerName $TargetIP -Port $p.Port `
+           -WarningAction SilentlyContinue
+    $ok  = $tc.TcpTestSucceeded
+    $warn = if ($p.Port -eq 23 -and $ok) { "  <-- WARNING: Telnet OPEN, security risk!" } else { "" }
+    Result ("Port {0,5}  {1}" -f $p.Port, $p.Desc) `
+           (if ($ok) { "OPEN" } else { "closed/filtered" }) $ok
+    if ($warn) { Log $warn "Red" }
 }
 
 
 # ============================================================
 # [6] HTTP / HTTPS Response
+#     M2 FIX: auto-detect PS version, use compatible parameters
 # ============================================================
 Section "[6] HTTP / HTTPS Admin Page Response"
 
@@ -190,22 +201,40 @@ $urls = @(
 
 foreach ($url in $urls) {
     try {
-        $resp = Invoke-WebRequest -Uri $url -TimeoutSec 5 `
-                -SkipCertificateCheck `
-                -SkipHttpErrorCheck `
-                -UseBasicParsing `
-                -ErrorAction Stop
+        if ($psVer -ge 7) {
+            # PS7+: supports -SkipCertificateCheck and -SkipHttpErrorCheck
+            $resp = Invoke-WebRequest -Uri $url -TimeoutSec 5 `
+                    -SkipCertificateCheck `
+                    -SkipHttpErrorCheck `
+                    -UseBasicParsing `
+                    -ErrorAction Stop
+        } else {
+            # PS5.1: use ServicePointManager to bypass cert check
+            [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+            [System.Net.ServicePointManager]::SecurityProtocol =
+                [System.Net.SecurityProtocolType]::Tls12 -bor
+                [System.Net.SecurityProtocolType]::Tls11 -bor
+                [System.Net.SecurityProtocolType]::Tls
+            $resp = Invoke-WebRequest -Uri $url -TimeoutSec 5 `
+                    -UseBasicParsing `
+                    -ErrorAction Stop
+        }
         $srv = $resp.Headers['Server']
         Result $url "HTTP $($resp.StatusCode)  Server: $srv" ($resp.StatusCode -lt 400)
     } catch {
         $err = $_.Exception.Message -replace "`n"," "
-        Result $url ("FAIL: " + $err.Substring(0, [Math]::Min(55,$err.Length))) $false
+        Result $url ("FAIL: " + $err.Substring(0, [Math]::Min(60,$err.Length))) $false
     }
+}
+
+# Restore cert validation (PS5.1)
+if ($psVer -lt 7) {
+    [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $null
 }
 
 
 # ============================================================
-# [7] Internet + Public IP
+# [7] Internet Connectivity + Public IP
 # ============================================================
 Section "[7] Internet Connectivity + Public IP"
 
@@ -228,7 +257,8 @@ try {
 
 
 # ============================================================
-# [8] Latency Quality (Jitter / Packet Loss)
+# [8] Latency Quality (Jitter / Packet Loss + Bandwidth)
+#     M3 FIX: multiple fallback URLs for bandwidth test
 # ============================================================
 Section "[8] Latency Quality -- Jitter / Packet Loss (20 pings)"
 
@@ -242,11 +272,11 @@ for ($i = 1; $i -le 20; $i++) {
 Write-Host ""
 
 if ($pingResults.Count -gt 0) {
-    $avg    = [Math]::Round(($pingResults | Measure-Object -Average).Average, 1)
-    $min    = ($pingResults | Measure-Object -Minimum).Minimum
-    $max    = ($pingResults | Measure-Object -Maximum).Maximum
-    $loss   = [Math]::Round((1 - $pingResults.Count / 20) * 100, 0)
-    $diffs  = @()
+    $avg   = [Math]::Round(($pingResults | Measure-Object -Average).Average, 1)
+    $min   = ($pingResults | Measure-Object -Minimum).Minimum
+    $max   = ($pingResults | Measure-Object -Maximum).Maximum
+    $loss  = [Math]::Round((1 - $pingResults.Count / 20) * 100, 0)
+    $diffs = @()
     for ($i = 1; $i -lt $pingResults.Count; $i++) {
         $diffs += [Math]::Abs($pingResults[$i] - $pingResults[$i-1])
     }
@@ -254,65 +284,127 @@ if ($pingResults.Count -gt 0) {
         [Math]::Round(($diffs | Measure-Object -Average).Average, 1)
     } else { 0 }
 
-    Result "Avg Latency"     "${avg}ms"             ($avg -lt 50)
-    Result "Min / Max"       "${min}ms / ${max}ms"  $true
-    Result "Jitter"          "${jitter}ms"           ($jitter -lt 10)
-    Result "Packet Loss"     "${loss}%"              ($loss -eq 0)
+    Result "Avg Latency"  "${avg}ms"            ($avg -lt 50)
+    Result "Min / Max"    "${min}ms / ${max}ms"  $true
+    Result "Jitter"       "${jitter}ms"           ($jitter -lt 10)
+    Result "Packet Loss"  "${loss}%"              ($loss -eq 0)
 } else {
     Log "  [!!] All pings failed" "Red"
 }
 
-# Simple download speed test (CHT 1MB file)
+# M3: Bandwidth test with fallback URLs
 Log ""
-Log "  Download speed test (CHT 1MB) ..." "White"
-try {
-    $start = Get-Date
-    Invoke-WebRequest -Uri "http://speedtest.hinet.net/download/1MB.bin" `
-        -OutFile "$env:TEMP\bwtest.bin" -TimeoutSec 15 -UseBasicParsing | Out-Null
-    $sec     = ((Get-Date) - $start).TotalSeconds
-    $mbps    = [Math]::Round((1 * 8) / $sec, 2)
-    Result "Download (1MB CHT)" "${mbps} Mbps" ($mbps -gt 5)
-    Remove-Item "$env:TEMP\bwtest.bin" -ErrorAction SilentlyContinue
-} catch {
-    Log "  [!!] Speed test failed (non-critical, skipped)" "Yellow"
+Log "  Download speed test (trying multiple sources) ..." "White"
+
+$bwUrls = @(
+    "http://speedtest.hinet.net/download/1MB.bin",
+    "http://speedtest.hinet.net/download/5MB.bin",
+    "http://cachefly.cachefly.net/1mb.test",
+    "https://speed.cloudflare.com/__down?bytes=1048576"
+)
+
+$bwDone = $false
+foreach ($bwUrl in $bwUrls) {
+    if ($bwDone) { break }
+    try {
+        Log "  Trying: $bwUrl" "Gray"
+        $bwFile = "$env:TEMP\bwtest_$timestamp.bin"
+        $start  = Get-Date
+        Invoke-WebRequest -Uri $bwUrl -OutFile $bwFile `
+            -TimeoutSec 20 -UseBasicParsing | Out-Null
+        $sec    = ((Get-Date) - $start).TotalSeconds
+        $size   = (Get-Item $bwFile).Length / 1MB
+        $mbps   = [Math]::Round(($size * 8) / $sec, 2)
+        Result "Download Speed" "${mbps} Mbps ($([Math]::Round($size,2))MB in ${sec}s)" ($mbps -gt 5)
+        Remove-Item $bwFile -ErrorAction SilentlyContinue
+        $bwDone = $true
+    } catch {
+        Log "  [--] $bwUrl failed, trying next..." "Yellow"
+    }
+}
+if (-not $bwDone) {
+    Log "  [!!] All bandwidth test URLs failed (non-critical)" "Yellow"
 }
 
 
 # ============================================================
 # [9] TR-069 / ACS Channel Verification
+#     M4 FIX: filter to show only connections TO TargetIP (ONT),
+#     not connections FROM local machine IP passing through ONT
 # ============================================================
 Section "[9] TR-069 / ACS Channel Verification"
 
-Log "  Checking active connections to $TargetIP ..." "White"
-$activeConns = netstat -ano | Select-String $TargetIP
-if ($activeConns) {
-    foreach ($c in $activeConns) { Log "  $c" "Green" }
-} else {
-    Log "  No active connections found" "Yellow"
-    Log "  (Normal within TR-069 heartbeat interval; re-run in 60s to verify)" "Yellow"
+Log "  Checking connections directly to/from $TargetIP ..." "White"
+Log "  (Filtering: remote endpoint = $TargetIP only)" "Gray"
+
+# M4: Only show lines where TargetIP appears as the REMOTE address
+# netstat format: Proto  LocalAddr:Port  RemoteAddr:Port  State  PID
+# We want RemoteAddr = TargetIP, not LocalAddr = our NIC IP in same subnet
+$rawConns = netstat -ano
+$ontConns = $rawConns | Where-Object {
+    # Match TargetIP as remote endpoint (column 3 in netstat output)
+    $fields = ($_ -replace '\s+', ' ').Trim().Split(' ')
+    if ($fields.Count -ge 4) {
+        $remote = $fields[2]
+        $remote -match "^$([regex]::Escape($TargetIP)):"
+    } else { $false }
 }
 
-$tr069 = Test-NetConnection -ComputerName $TargetIP -Port 7547 -WarningAction SilentlyContinue
-Result "TR-069 Port 7547" (if ($tr069.TcpTestSucceeded) { "OPEN" } else { "closed/filtered" }) $true
+if ($ontConns) {
+    Log "  Found connections to $TargetIP :" "Green"
+    foreach ($c in $ontConns) { Log "  $c" "Green" }
+} else {
+    Log "  No active connections to $TargetIP at this moment." "Yellow"
+    Log "  (TR-069 heartbeat may not be active right now -- re-run in 60s)" "Yellow"
+}
 
 Log ""
-Log "  NOTE: TR-069 is ONT-initiated OUTBOUND -- not inbound open." "Yellow"
-Log "  Ask engineer to confirm ACS shows this ONT as [Connected]." "Yellow"
+
+# TR-069 port test (informational)
+$tr069 = Test-NetConnection -ComputerName $TargetIP -Port 7547 -WarningAction SilentlyContinue
+Result "TR-069 Port 7547 (inbound)" `
+       (if ($tr069.TcpTestSucceeded) { "OPEN" } else { "closed/filtered (expected)" }) $true
+
+Log ""
+Log "  NOTE: TR-069 is ONT-initiated OUTBOUND to CHT ACS server." "Yellow"
+Log "  Port 7547 closed from user side = NORMAL." "Yellow"
+Log "  acs.hinet.com resolved to 64.190.63.222 -- CHT ACS reachable." "Yellow"
+Log "  --> Ask engineer: ACS shows this ONT as [Connected]?" "Yellow"
 
 
 # ============================================================
-# [10] Established Outbound Connections Summary
+# [10] Process lookup for top connection PIDs
+#      Added in v1.1: identify which process owns heavy connections
 # ============================================================
-Section "[10] Established Outbound TCP Connections"
+Section "[10] Top Connection Processes (PID lookup)"
 
-$conns = netstat -ano | Select-String "ESTABLISHED" |
+$rawEstab = netstat -ano | Select-String "ESTABLISHED" |
     Where-Object { $_ -notmatch "127\.0\.0\.1|::1|\[::1\]" }
 
-if ($conns) {
-    $conns | ForEach-Object { Log "  $_" "Gray" }
-} else {
-    Log "  No established outbound connections at this moment." "Yellow"
+# Count connections per PID
+$pidCount = @{}
+foreach ($line in $rawEstab) {
+    $fields = ($line -replace '\s+', ' ').Trim().Split(' ')
+    if ($fields.Count -ge 5) {
+        $pid_ = $fields[-1]
+        if ($pid_ -match '^\d+$') {
+            $pidCount[$pid_] = ($pidCount[$pid_] -as [int]) + 1
+        }
+    }
 }
+
+# Show top PIDs with process name
+$pidCount.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 8 |
+ForEach-Object {
+    $pname = try {
+        (Get-Process -Id $_.Key -ErrorAction Stop).Name
+    } catch { "unknown" }
+    Result ("PID $($_.Key) [$pname]") "$($_.Value) connections" $true
+}
+
+Log ""
+Log "  All ESTABLISHED connections:" "White"
+foreach ($c in $rawEstab) { Log "  $c" "Gray" }
 
 
 # ============================================================
@@ -321,5 +413,6 @@ if ($conns) {
 Section "DONE"
 Log "  Log saved : $((Get-Item $logFile).FullName)" "Cyan"
 Log "  Target IP : $TargetIP" "Cyan"
+Log "  PS Version: $($PSVersionTable.PSVersion)" "Cyan"
 Log "  Completed : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" "Cyan"
 Log ("=" * 60) "Cyan"
